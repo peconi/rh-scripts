@@ -338,6 +338,13 @@ def main() -> int:
     MIN_EFFECT_RATIO = 2.0
     MIN_EFFECT_MS = 0.05     # below this, the effect is under the timer's own resolution
     worth, rejected = [], []
+    # ⛔ WHAT THIS TOOL ENDORSES, recorded as data rather than left for a consumer to
+    # re-derive. A downstream `min()` over every pair swept is NOT this tool's
+    # recommendation: it ignores both gates and it mixes the destination dimension
+    # into what reads as a source-port pick. That mistake is already documented in
+    # this repo for phaseC-confirm.sh, and analyse.py was making it too.
+    dst_endorsed = False
+    endorsed_ports: dict[str, int] = {}
 
     # DESTINATION. It used to be recommended on `dst_gain > 0.05` alone — a bare
     # magic number, no noise comparison, and an ordering nothing ever re-drew. Both
@@ -355,6 +362,7 @@ def main() -> int:
         elif not dst_ok:
             rejected.append("destination ordering did NOT reproduce")
         else:
+            dst_endorsed = True
             worth.append(f"pinning destination {best_d} (worth {dst_gain:.3f} ms at p50, "
                          f"{dst_ratio:.1f}x noise, ordering reproduced)")
 
@@ -379,8 +387,20 @@ def main() -> int:
             rejected.append(f"{d} showed a {ratio:.1f}x port effect whose ordering did "
                             f"NOT reproduce")
         else:
+            endorsed_ports[d] = min(ps, key=ps.get)
             worth.append(f"source-port selection on {d} "
                          f"(spread {spread:.3f} = {ratio:.1f}x the sd of {within:.3f})")
+
+    # The single (dst, sport) this tool recommends, if any. Chosen only from the
+    # destinations whose port effect cleared BOTH gates; a bare port number means
+    # "any ephemeral port" and is only offered when the destination dimension alone
+    # was endorsed.
+    selected = None
+    if endorsed_ports:
+        d_sel = min(endorsed_ports, key=lambda d: q(got[(d, endorsed_ports[d])], .5))
+        selected = [d_sel, endorsed_ports[d_sel]]
+    elif dst_endorsed:
+        selected = [best_d, None]
 
     for r in rejected:
         print(f"  rejected: {r}")
@@ -390,20 +410,43 @@ def main() -> int:
     # ⛔ tot == 0 USED TO PASS. `held < tot` is `0 < 0` -> False, so a run where every
     # single re-test came back empty fell through to "worth playing" — the gate
     # inverted precisely when the evidence was weakest.
+    # ⭐ ONE verdict variable drives BOTH the printed text and the JSON artifact.
+    # They used to be separate: the console said "NO LOTTERY WORTH PLAYING" while
+    # the JSON carried only held/total — and held == total reads as a clean pass to
+    # anything downstream. analyse.py duly published a lottery gain, with a tidy
+    # "2/2", on a leg this tool had just rejected on both gates.
     if tot == 0 and dst_ok is None:
+        verdict = "cannot_verify"
+        selected = None
         print("VERDICT: CANNOT VERIFY — nothing was re-tested successfully, so no claim\n"
               "         here has been checked against fresh samples. Re-run.")
     elif not worth:
+        verdict = "no_lottery"
+        selected = None
         print("VERDICT: NO LOTTERY WORTH PLAYING on this leg — nothing cleared both the\n"
               "         effect-size bar and the re-test.")
     else:
+        verdict = "worth_playing"
         print("VERDICT: worth playing —\n         " + "\n         ".join(worth))
 
     if a.json:
         json.dump({"pairs": {f"{d}|{p}": v for (d, p), v in got.items()},
                    "recheck": {f"{d}|{p}": v for (d, p), v in got2.items()},
                    "dst_gain_ms": dst_gain, "best_dst": best_d,
-                   "held": held, "total": tot}, open(a.json, "w"))
+                   "held": held, "total": tot,
+                   # Everything the verdict was made of, so no consumer ever has to
+                   # re-implement a gate. A second implementation of a gate is a
+                   # second chance for it to disagree with this one.
+                   "schema": 2,
+                   "verdict": verdict,
+                   "selected": selected,
+                   "worth": worth,
+                   "rejected": rejected,
+                   "dst_order_held": dst_ok,
+                   "dst_noise_ms": dst_noise,
+                   "dst_ratio": dst_ratio,
+                   "port_order_held": verified,
+                   }, open(a.json, "w"))
         print(f"wrote {a.json}")
     return 0
 
