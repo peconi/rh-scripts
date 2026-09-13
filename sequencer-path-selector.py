@@ -355,7 +355,7 @@ def main() -> int:
             rejected.append(f"destination choice is only {dst_gain:.3f} ms — below the "
                             f"{MIN_EFFECT_MS} ms floor")
         elif dst_ratio < MIN_EFFECT_RATIO:
-            rejected.append(f"destination choice {dst_gain:.3f} ms is only {dst_ratio:.1f}x "
+            rejected.append(f"destination choice {dst_gain:.3f} ms is only {dst_ratio:.2f}x "
                             f"the {dst_noise:.3f} ms spread inside each destination")
         elif dst_ok is None:
             rejected.append("destination ordering could not be re-tested")
@@ -377,7 +377,10 @@ def main() -> int:
             continue
         if ratio < MIN_EFFECT_RATIO:
             if within and spread > within:
-                rejected.append(f"{d} port spread {spread:.3f} is only {ratio:.1f}x its sd "
+                # ⛔ Two decimals here, not one. At 1.98 the old format printed
+                # "only 2.0x ... below the 2.0x bar", which reads as a bug in the
+                # tool rather than a rejection a reader can check.
+                rejected.append(f"{d} port spread {spread:.3f} is only {ratio:.2f}x its sd "
                                 f"{within:.3f} — below the {MIN_EFFECT_RATIO}x bar")
             continue
         if d not in verified:

@@ -297,6 +297,26 @@ discarded, and that is **not** counted in `--seconds`.
 
 ---
 
+## What `--json` writes (path selector)
+
+A consumer should read the tool's **verdict**, not re-derive one from the raw counters.
+That mistake — a downstream analyser inferring "worth playing" from the determinism
+counts alone, blind to the effect-size gate — is why these fields exist:
+
+| key | meaning |
+|---|---|
+| `schema` | `2`. **Treat a file without this as withheld, not as a pass.** |
+| `verdict` | `worth_playing`, `no_lottery`, or `not_reproducible` — the tool's own decision |
+| `selected` | `[destination, source_port]` the tool endorses, or absent |
+| `best_dst` / `dst_gain_ms` | best destination by p50 and what choosing it is worth |
+| `dst_order_held` / `port_order_held` | did each ordering reproduce on fresh samples |
+| `held` / `total` | destinations whose port ordering held, over those actually re-tested |
+| `pairs` / `recheck` | raw per-sample lists, keyed `"<dst>|<sport>"` |
+
+⛔ `held`/`total` counts only destinations that produced re-test samples. A skipped
+gate is in neither the numerator nor the denominator — so `2/2` does not mean two of
+two destinations, it means two of the two that could be tested.
+
 ## A note on concurrency
 
 Neither script tries to open an unlimited number of connections, because the feed will not
@@ -306,7 +326,7 @@ allow it — and the shape of the limit is not what most people assume.
 over time; what you may not do is hold many open at once. There is no penalty window — the
 moment you release a slot, you may use it again.
 
-The cap is **per source address** and it is small — around two to three — and it **moves**,
+The cap is **per source address** and it is small — **two to five observed so far** — and it **moves**,
 so neither script hardcodes a number. `sequencer-feed-monitor.py` learns it from the first
 refusal and backs off.
 
