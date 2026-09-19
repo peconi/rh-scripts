@@ -96,6 +96,7 @@ import re
 import socket
 import ssl
 import struct
+import zlib
 import sys
 import time
 from dataclasses import dataclass, field
@@ -329,11 +330,23 @@ def open_one(host: str, ip: str, sport: int, *, path: str = "/",
     # ONE exit for every post-connect failure, and it goes through _hard_close.
     try:
         key = _ws_key()
+        # ⛔ permessage-deflate IS MANDATORY ON THIS ENDPOINT SINCE 2026-09-17.
+        # The feed went compressed-only on that date. Without this header the server
+        # answers 400 Bad Request and no stream ever starts -- which looks exactly
+        # like an outage and is not one. MEASURED 2026-09-19: without it 400, with it
+        # "HTTP/1.1 101 Switching Protocols" and
+        # "sec-websocket-extensions: permessage-deflate; server_no_context_takeover;
+        #  client_no_context_takeover".
+        # ⭐ We REQUEST no_context_takeover in both directions on purpose: it makes every
+        # message independently compressed, so a decoder needs no cross-message state and
+        # a dropped/late frame cannot corrupt the ones after it.
         req = (f"GET {path} HTTP/1.1\r\n"
                f"Host: {host}\r\n"
                f"Upgrade: websocket\r\n"
                f"Connection: Upgrade\r\n"
                f"Sec-WebSocket-Version: 13\r\n"
+               f"Sec-WebSocket-Extensions: permessage-deflate; "
+               f"client_no_context_takeover; server_no_context_takeover\r\n"
                f"Sec-WebSocket-Key: {key}\r\n\r\n")
         tls.sendall(req.encode())
 
@@ -572,8 +585,26 @@ def iter_frames(c: Conn):
         if len(b) < off + ln:
             return
         op = b[0] & 0x0F
+        rsv1 = bool(b[0] & 0x40)          # permessage-deflate marks compressed frames here
         payload = bytes(b[off:off + ln])
         del b[:off + ln]
+        if rsv1 and op in (1, 2):
+            # ⛔ SINCE 2026-09-17 THE FEED IS COMPRESSED-ONLY, so every data frame arrives
+            # DEFLATE'd and MUST be inflated before anything can parse a sequence number
+            # out of it. Offering the extension without doing this is WORSE than not
+            # offering it: the upgrade succeeds, the connection looks healthy, and the
+            # run silently scores ZERO races. Measured exactly that way on 2026-09-19
+            # ("admitted above sequence 0", races 0) before this was added.
+            # ⭐ We negotiate server_no_context_takeover, so each message is compressed
+            # independently and a FRESH decompressor per message is correct -- no state
+            # carries between messages, so one bad frame cannot corrupt the next.
+            # The 4-byte tail is the empty deflate block RFC 7692 §7.2.2 requires callers
+            # to append before inflating a permessage-deflate payload.
+            try:
+                payload = zlib.decompressobj(-zlib.MAX_WBITS).decompress(
+                    payload + b"\x00\x00\xff\xff")
+            except zlib.error as e:
+                raise ConnectionError(f"deflate failed: {e} — desynchronised") from None
         yield op, payload
 
 
