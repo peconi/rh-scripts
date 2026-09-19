@@ -31,21 +31,17 @@ All output below is from real runs of the code in this repository. Nothing is il
 
 ### TL;DR
 
-The feed sits behind Cloudflare. **Three independent lotteries are drawn when you connect
+The feed sits behind Cloudflare. **Two independent lotteries are drawn when you connect
 and then fixed for the life of that connection:**
 
-1. **The return path.** A large share of connections take a route two hops longer coming
-   back. It is selected by a hash of the connection's 4-tuple — and the **source port** is
-   the only part of that tuple you control. So bind a port, time the handshake, keep it if
-   it is fast, throw it away if it is not.
-2. **The origin.** Cloudflare Load Balancing pins each connection to one origin instance,
+1. **The origin.** Cloudflare Load Balancing pins each connection to one origin instance,
    named in the `__cflb` cookie on the upgrade response. The arrival-lag spread between the
-   best and worst origin was measured **larger than the return-path penalty** — and it is
-   free to avoid, because the cookie tells you which one you drew.
-3. **The colo.** Anycast decides which Cloudflare edge serves you. From a fixed location you
+   best and worst origin is large — and it is free to avoid, because the cookie tells you
+   which one you drew.
+2. **The colo.** Anycast decides which Cloudflare edge serves you. From a fixed location you
    do not control this, so the script only records it.
 
-The strategy is therefore: **open more connections than you need, measure all three, keep
+The strategy is therefore: **open more connections than you need, measure both, keep
 the winners, and keep scoring the survivors** — because a connection that leads at 09:00 can
 fall behind by 11:00, and you want to know when it does.
 
@@ -66,21 +62,21 @@ python3 sequencer-feed-monitor.py race --host feed.example.com --seq-field '"seq
 
 ```
 $ python3 sequencer-feed-monitor.py race --keep 2 --probe 6
-host=feed.mainnet.chain.robinhood.com ip=104.20.46.209 keep=2 probe=6
+host=feed.mainnet.chain.robinhood.com ip=172.66.147.70 keep=2 probe=6
 racing:
-  draw 0: sport=61000 hs= 0.561ms FAST origin=A colo=CMH
-  draw 1: sport=61001 hs= 0.833ms FAST origin=A colo=CMH
+  draw 0: sport=61000 hs= 0.807ms origin=A colo=CMH
+  draw 1: sport=61001 hs= 0.881ms origin=A colo=CMH
   draw 2: at cap — this address holds 2 concurrent websocket(s)
-  draw 2: sport=61003 hs= 0.879ms FAST origin=A colo=CMH
-  draw 3: sport=61004 hs= 0.845ms FAST origin=B colo=CMH
-  draw 4: sport=61005 hs= 0.557ms FAST origin=A colo=CMH
-  draw 5: sport=61006 hs= 0.731ms FAST origin=B colo=CMH
+  draw 2: sport=61003 hs= 0.815ms origin=A colo=CMH
+  draw 3: sport=61004 hs= 0.764ms origin=A colo=CMH
+  draw 4: sport=61005 hs= 0.580ms origin=A colo=CMH
+  draw 5: sport=61006 hs= 0.674ms origin=A colo=CMH
   (1 draw(s) refused at the cap; that is expected and not an error)
-  keeping 2 of 2: 2 fast-path, 2 distinct origin(s) [A, B]
+  keeping 2 of 2: 1 distinct origin(s) [A, A]
 
 kept:
-  sport=61005 hs= 0.557ms FAST origin=A colo=CMH
-  sport=61006 hs= 0.731ms FAST origin=B colo=CMH
+  sport=61005 hs= 0.580ms origin=A colo=CMH
+  sport=61006 hs= 0.674ms origin=A colo=CMH
 ```
 
 Note `draw 2`. **The feed caps how many WebSocket connections one source address may hold at
@@ -98,18 +94,18 @@ $ python3 sequencer-feed-monitor.py watch --keep 2 --probe 6 --seconds 45 --ever
   [ ... race output as above ... ]
 
 settling (discarding the replay backlog)...
-  admitted above sequence 60361711
+  admitted above sequence 67331739
 
---- 2026-09-11T15:27:49Z ---
- sport   hs_ms  path origin          colo   races    won   won%  median_lag_ms  relapse  skipped
- 61005   0.557  FAST A                CMH     442    405  91.6%          6.906        1        4
- 61006   0.731  FAST B                CMH     442     37   8.4%         25.599        1     3182
+--- 2026-09-19T19:27:21Z ---
+ sport   hs_ms origin          colo   races    won   won%  median_lag_ms  relapse  skipped
+ 61016   0.603 B                CMH     447    258  57.7%         15.272        0        2
+ 61005   0.721 A                CMH     448    190  42.4%         17.611        1        4
 
-  >> KEEP: sport 61005 (origin A, 91.6% of messages first)
+  >> KEEP: sport 61016 (origin B, 57.7% of messages first)
 
   [ ... the run then prints a legend for each column; omitted here ... ]
 
-  origins: A=02DiuJ4sK723JTf1BpD2q75o  B=0H28vuXLJ6LQPaB5R1EAZ6ww
+  origins: A=0H28vuXLJ6LQPaB5R1EAZ6ww  B=02DiuJ4sK723JTf1BpD2qK81
 ```
 
 **Read the `won%` column and nothing else.** It is the fraction of messages this connection
@@ -145,18 +141,18 @@ why the file is longer than it looks like it should be.
 - **Winning is not a lag of zero.** Score a connection only on the races it *loses*. If a win
   writes 0.0 into its own samples, anything winning more than half its races reports a median
   lag of exactly 0.000 forever.
-- **"Fast" is a difference, so it has to be relative** to the other connections in the same
-  cohort. An absolute threshold marks every connection from a distant host as slow.
 - **Do not probe and then reconnect on the same 4-tuple.** Reusing it straight after an RST
   gets the SYN dropped and the kernel waits out its retransmit timer — one measured handshake
-  took 1034 ms instead of 1.3 ms and was recorded as a return-path measurement. Measure on the
+  took 1034 ms instead of 1.3 ms and was recorded as a genuine handshake. Measure on the
   socket you intend to keep.
 - **Discard a losing probe with RST, not FIN.** A clean close parks the 4-tuple in `TIME_WAIT`
   and the next probe in the port walk is handed the same port back.
 - **ICMP cannot see any of this.** `ping` and a default `mtr` carry one fixed flow tuple, so
-  they draw one path and stay on it. On one host, two addresses of the same service gave two
-  *opposite* wrong pictures — one looked flawless, one uniformly slow, neither showed the
-  split. Only TCP with pinned source ports sees it.
+  they sample one path and stay on it. Both lotteries above are drawn **per connection**, so a
+  tool that only ever makes *one* connection cannot see either — it reports whichever draw it
+  happened to get as though it were the network. On one host, two addresses of the same service
+  gave two *opposite* wrong pictures — one looked flawless, one uniformly slow, and neither
+  matched what clients actually got.
 
 ---
 

@@ -6,27 +6,19 @@ Cloudflare-fronted feed.
 WHY THIS EXISTS
 ===============
 On a Cloudflare-fronted feed, *which connection you happen to get* matters more
-than anything you can buy. Three independent lotteries are drawn at connect time
+than anything you can buy. Two independent lotteries are drawn at connect time
 and then FIXED for the life of that connection:
 
-  1. THE RETURN PATH. A large fraction of connections take a route two hops
-     longer on the return leg. Measured on one path: +6.3 ms, ~45-50% of
-     connections, selected by a hash of the connection 4-tuple. The source port
-     is the only part of that tuple a client controls -- so the path IS
-     selectable: bind a port, time the handshake, keep it if fast, discard it if
-     slow.
-
-  2. THE ORIGIN. Cloudflare Load Balancing pins each connection to one of a small
+  1. THE ORIGIN. Cloudflare Load Balancing pins each connection to one of a small
      number of origin instances, named in the `__cflb` cookie on the upgrade
      response. Measured arrival-lag spread between the best and worst origin:
-     ~9.4 ms -- LARGER than the return-path defect, and free to avoid, because
-     the cookie tells you which one you got.
+     ~9.4 ms -- and free to avoid, because the cookie tells you which one you got.
 
-  3. THE COLO. Cloudflare's anycast decides which edge serves you; `cf-ray`
+  2. THE COLO. Cloudflare's anycast decides which edge serves you; `cf-ray`
      reports it. From a fixed location you do not control this, so this file only
      records it.
 
-So the strategy is: open more connections than you need, measure all three, keep
+So the strategy is: open more connections than you need, measure both, keep
 the winners, drop the rest -- then keep scoring the survivors, because a
 connection that was fast at 09:00 can fall behind by 11:00 and you want to know.
 
@@ -52,23 +44,20 @@ fixed. They are the reason this file is longer than it looks like it should be.
     a win writes 0.0 into its own sample list, anything winning more than half
     its races reports a median lag of exactly 0.000 forever.
 
-  * "FAST" IS A DIFFERENCE, SO IT MUST BE RELATIVE. The defect is +6.3 ms
-    *versus the other connections in the same cohort*. An absolute threshold
-    marks every connection from a distant host as slow, and the column you wanted
-    to stratify everything else by is uniformly false.
-
   * DO NOT PROBE-THEN-RECONNECT ON THE SAME 4-TUPLE. Reusing a 4-tuple straight
     after an RST gets the SYN dropped and the kernel waits out its retransmit
     timer: one measured handshake took 1034 ms instead of 1.3 ms and was recorded
-    as a return-path measurement. Measure on the socket you intend to keep.
+    as a genuine handshake. Measure on the socket you intend to keep.
 
   * DISCARD A LOSING PROBE WITH RST, NOT FIN. A clean close parks the 4-tuple in
     TIME_WAIT, and the next probe in the port walk gets handed that same port.
 
   * ICMP CANNOT SEE ANY OF THIS. ping and default mtr carry one fixed flow tuple,
-    so they draw one path and stay on it. On one host, two VIPs gave two OPPOSITE
-    wrong pictures -- one looked flawless, one uniformly slow, neither showed a
-    split. Only TCP with pinned source ports sees it.
+    so they sample one path and stay on it. Both lotteries above are drawn PER
+    CONNECTION, so a tool that only ever makes ONE connection cannot see either:
+    it reports whichever draw it happened to get as though it were the network.
+    On one host, two VIPs gave two OPPOSITE wrong pictures -- one looked
+    flawless, one uniformly slow, and neither matched what clients actually got.
 
 USAGE
 =====
@@ -106,10 +95,6 @@ from dataclasses import dataclass, field
 # ---------------------------------------------------------------------------
 
 DEFAULT_HOST = "feed.mainnet.chain.robinhood.com"
-
-# A connection is on the fast path if its handshake is within this many ms of the
-# BEST in its own cohort. Relative, never absolute -- see the notes above.
-FAST_PATH_MARGIN_MS = 4.0
 
 # Leading chars of the __cflb cookie that identify the origin instance.
 ORIGIN_PREFIX = 24
@@ -213,9 +198,6 @@ class Conn:
     dead: bool = False              # peer closed: readable forever, recv gives b""
     buf: bytearray = field(default_factory=bytearray)
 
-    # Set once the whole cohort's handshakes are known. None = no cohort.
-    path_is_fast: bool | None = None
-
     # Messages at or below this are THIS connection's replay backlog, not races.
     admit_above: int = 0
     backlog_skipped: int = 0
@@ -227,12 +209,6 @@ class Conn:
     firsts: int = 0                 # races won (recorded as a count, NOT as 0.0 lag)
     races: int = 0
     last_seq: int = 0
-
-    @property
-    def fast_path(self) -> bool:
-        if self.path_is_fast is not None:
-            return self.path_is_fast
-        return self.handshake_ms < FAST_PATH_MARGIN_MS
 
     @property
     def median_lag_ms(self) -> float | None:
@@ -248,7 +224,6 @@ class Conn:
 
     def __str__(self) -> str:
         return (f"sport={self.sport} hs={self.handshake_ms:6.3f}ms "
-                f"{'FAST' if self.fast_path else 'slow'} "
                 f"origin={origin_label(self.origin)} colo={self.colo}")
 
 
@@ -299,8 +274,8 @@ def open_one(host: str, ip: str, sport: int, *, path: str = "/",
     """
     Open ONE connection and record which lotteries it won.
 
-    The TCP handshake time IS the return-path measurement. It is taken on the
-    socket we intend to keep -- never probe-then-reconnect on the same 4-tuple.
+    The TCP handshake time is taken on the socket we intend to keep -- never
+    probe-then-reconnect on the same 4-tuple.
 
     `timeout` is a deadline for the WHOLE upgrade, not per-recv: checking it only
     at the top of the loop while each recv carries the full timeout lets a peer
@@ -511,20 +486,14 @@ def race_connections(host: str, ip: str, want: int, probe: int, *,
 
 def select_best(got: list[Conn], want: int, log=print) -> list[Conn]:
     """
-    Keep the best `want`: fast path first, then SPREAD ACROSS ORIGINS, then backfill.
+    Keep the best `want`: fastest handshake first, then SPREAD ACROSS ORIGINS,
+    then backfill.
 
     Diversifying across origins matters more than it looks. If every connection
     lands on the same origin and that origin is the slow one, no number of
     connections helps you.
     """
-    if got:
-        # The return-path lottery is a DIFFERENCE, so classify against the cohort
-        # it was drawn with, never against an absolute threshold.
-        best_ms = min(c.handshake_ms for c in got)
-        for c in got:
-            c.path_is_fast = (c.handshake_ms - best_ms) < FAST_PATH_MARGIN_MS
-
-    got.sort(key=lambda c: (not c.fast_path, c.handshake_ms))
+    got.sort(key=lambda c: c.handshake_ms)
     keep: list[Conn] = []
     kept_ids: set[int] = set()
     seen_origins: set[str] = set()
@@ -546,7 +515,6 @@ def select_best(got: list[Conn], want: int, log=print) -> list[Conn]:
         if id(c) not in kept_ids:
             _hard_close(c.sock)                                   # discarded probe: RST
     log(f"  keeping {len(keep)} of {len(got)}: "
-        f"{sum(c.fast_path for c in keep)} fast-path, "
         f"{len(set(c.origin for c in keep))} distinct origin(s) "
         f"[{', '.join(sorted(origin_label(c.origin) for c in keep))}]")
     return keep
@@ -749,7 +717,7 @@ class Pool:
 
     def report(self) -> str:
         rows = []
-        rows.append(f"{'sport':>6} {'hs_ms':>7} {'path':>5} {'origin':<14} {'colo':>5} "
+        rows.append(f"{'sport':>6} {'hs_ms':>7} {'origin':<14} {'colo':>5} "
                     f"{'races':>7} {'won':>6} {'won%':>6} {'median_lag_ms':>14} "
                     f"{'relapse':>8} {'skipped':>8}")
         # ⛔ RANK ON win%, NOT on median lag. A connection is scored only on the
@@ -767,7 +735,7 @@ class Pool:
             ml = c.median_lag_ms
             thin = c.races < MIN_RACE_SAMPLES
             rows.append(
-                f"{c.sport:>6} {c.handshake_ms:>7.3f} {'FAST' if c.fast_path else 'slow':>5} "
+                f"{c.sport:>6} {c.handshake_ms:>7.3f} "
                 f"{origin_label(c.origin):<14} {c.colo:>5} {c.races:>7} {c.firsts:>6} "
                 f"{(100.0 * c.firsts / c.races if c.races else 0.0):>5.1f}% "
                 f"{('n/a' if ml is None else f'{ml:.3f}'):>14} {c.relapses:>8} "
@@ -809,7 +777,7 @@ class Pool:
             "utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "note": note,
             "conns": [{"sport": c.sport, "handshake_ms": c.handshake_ms,
-                       "fast_path": c.fast_path, "origin": c.origin,
+                       "origin": c.origin,
                        "origin_label": origin_label(c.origin), "colo": c.colo,
                        "races": c.races, "firsts": c.firsts,
                        "won_pct": (100.0 * c.firsts / c.races) if c.races else None,
@@ -893,7 +861,7 @@ def main() -> int:
         write_row(json_path, {"utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                               "note": "race", "host": a.host, "ip": ip,
                               "conns": [{"sport": c.sport, "handshake_ms": c.handshake_ms,
-                                         "fast_path": c.fast_path, "origin": c.origin,
+                                         "origin": c.origin,
                                          "origin_label": origin_label(c.origin),
                                          "colo": c.colo} for c in conns]}, rows)
         for c in conns:

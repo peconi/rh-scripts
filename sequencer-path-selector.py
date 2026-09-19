@@ -4,9 +4,8 @@ sequencer-path-selector.py -- is there a lottery to win on the SUBMIT leg?
 
 WHY THIS EXISTS, AND WHY IT IS NOT sequencer-feed-monitor.py
 ===========================================================
-`sequencer-feed-monitor.py` plays three lotteries that exist because the feed
-sits behind Cloudflare: the return path, the `__cflb` origin, and the anycast
-colo. NONE of those apply to `sequencer.mainnet.chain.robinhood.com`, which is
+`sequencer-feed-monitor.py` plays two lotteries that exist because the feed
+sits behind Cloudflare: the `__cflb` origin and the anycast colo. NEITHER applies to `sequencer.mainnet.chain.robinhood.com`, which is
 plain EC2 in us-east-2 with no CDN in front of it. So the question has to be
 asked again from scratch for the submit leg, and the answer may well be "there is
 no lottery here" -- which is a result, not a failure.
