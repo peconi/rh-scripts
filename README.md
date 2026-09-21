@@ -11,6 +11,7 @@ the client side, with nothing but the Python standard library.
 |---|---|---|
 | [`sequencer-feed-monitor.py`](sequencer-feed-monitor.py) | **read** — `feed.mainnet.chain.robinhood.com` | open more WebSocket connections than you need, keep the fast ones, and keep scoring them |
 | [`sequencer-path-selector.py`](sequencer-path-selector.py) | **submit** — `sequencer.mainnet.chain.robinhood.com` | find the fastest (destination, source port) pair — and refuse to recommend one that does not reproduce |
+| [`rh-feed-client.py`](rh-feed-client.py) | **read** — any feed endpoint | consume a sequencer feed over ONE connection, or race several sources and take whichever delivers first |
 
 **Requirements:** Python 3.9+ (tested on 3.9 and 3.12). No third-party packages, no build step, no configuration file.
 Both scripts resolve the endpoint live on every run, because the published address set is
@@ -155,6 +156,47 @@ why the file is longer than it looks like it should be.
   matched what clients actually got.
 
 ---
+
+## 3. `rh-feed-client.py` — reading a feed, from one connection or several
+
+A minimal, dependency-free reader. It exists to be **read and copied**, not just run:
+everything it does is what your own client has to do.
+
+```bash
+# straight from Robinhood
+python3 rh-feed-client.py --url wss://feed.mainnet.chain.robinhood.com --seconds 60
+
+# race two sources and see which delivers first
+python3 rh-feed-client.py \
+    --url wss://feed.mainnet.chain.robinhood.com \
+    --url ws://your-relay:9642 \
+    --seconds 60
+```
+
+Repeat `--url` to consume several sources at once. Every message is counted **once**,
+credited to whichever source delivered it first, and the summary tells you the split —
+which is the honest way to compare two feeds, because it never compares clocks on
+different machines.
+
+### What it handles that a naive client does not
+
+- **`permessage-deflate` is mandatory** on the public endpoint since 2026-09-17. Offer it
+  or you get `400 Bad Request` and no stream at all. ⚠️ It compresses the **message**, not
+  the frame: RSV1 rides on the first frame only and you inflate after reassembly.
+  Inflating per frame earns a 101 and then silently yields nothing on anything fragmented.
+- **The feed replays backlog to every new connection.** In one of our measurements 85% of
+  all messages arrived in the first ten seconds. Anything you time during that window is
+  history, not live delivery — `--settle` discards it.
+- **PING must be answered** or the server drops you.
+- **Sequence gaps are reported**, so a silent hole cannot pass as a clean run.
+
+### One thing worth knowing before you scale it
+
+The endpoint limits **concurrency per source address**, not request rate. Opening more
+sockets from one address does not buy you more of the feed — each connection is also
+pinned to one backend origin for its lifetime, and origins do not deliver at the same
+time. That is why this script can race several sources: the useful unit is *distinct
+source*, not *more sockets*.
 
 ## 2. `sequencer-path-selector.py` — the submit leg
 
