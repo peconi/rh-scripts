@@ -221,8 +221,13 @@ def main():
                         last_seq=seq; n+=1
                         if jf: jf.write(json.dumps({"utc":time.time(),"seq":seq,"src":s_["url"]})+"\n")
                         if a.print_every and n%a.print_every==0:
-                            print(f"  {n:>6} messages   seq={seq}   "
-                                  f"{n/max(1e-9,time.monotonic()-settle_until):.1f}/s")
+                            rate=n/max(1e-9,time.monotonic()-settle_until)
+                            # ⭐ show the running split LIVE — "who is winning" is the
+                            # whole point, and waiting for the summary hides it.
+                            split=("  ".join(f"{k['url'].split('//')[1].split('/')[0][:22]}"
+                                             f" {100.0*k['first']/n:5.1f}%" for k in srcs)
+                                   if len(srcs)>1 else "")
+                            print(f"  {n:>6} msgs  seq={seq}  {rate:4.1f}/s   {split}")
     except KeyboardInterrupt:
         pass
     finally:
